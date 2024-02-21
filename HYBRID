@@ -1,0 +1,186 @@
+#include <iostream>
+#include <vector>
+#include <random>
+#include <Eigen/Dense>
+#include <OpenFOAM/OpenFOAM.h>
+#include <OpenFOAM/RegIO/dictionaryIO.H>
+#include <OpenFOAM/TurbulenceModels/incompressible/RAS/kEpsilon/kEpsilon.H>
+
+using namespace Eigen;
+
+// Custom Activation Function inspired by vorticity
+class VorticityActivation {
+public:
+ VectorXf operator()(const MatrixXf& inputs) const {
+  MatrixXf curl = Eigen::curl(inputs);
+  VectorXf magnitude = curl.array().colwise().norm();
+  return magnitude.array().log1p().matrix(); // Log(1 + x) for stability
+ }
+};
+
+// Dynamic Connection Update based on fluid properties
+class DynamicConnectionUpdater {
+public:
+ MatrixXf update(const MatrixXf& weights, const VectorXf& fluid_features) const {
+  // Implement your logic for dynamic connection updates based on fluid features
+  // Example: Scale weights based on specific feature values
+  MatrixXf scaling_factors = VectorXf::Ones(weights.rows(), weights.cols()).asDiagonal();
+  for (int i = 0; i < weights.rows(); ++i) {
+   for (int j = 0; j < weights.cols(); ++j) {
+    scaling_factors(i, j) = std::max(0.5f, 1.0f + 0.5f * fluid_features(i));
+   }
+  }
+  return weights.array() * scaling_factors.array();
+ }
+};
+
+// Fully functional Fluid Lattice Neural Network architecture
+class FluidLatticeNN {
+private:
+ MatrixXf conv1_weights;
+ VectorXf dense1_weights;
+ VectorXf dense2_weights;
+ VectorXf bias1;
+ VectorXf bias2;
+ MatrixXf fluid_fc1_weights;
+ VectorXf fluid_fc1_bias;
+
+public:
+ FluidLatticeNN(int input_size, int conv_filter_size, int conv_filter_count, int dense1_units, int fluid_feature_size) {
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::normal_distribution<float> dist(0.0, 1.0);
+
+  conv1_weights = MatrixXf::Random(conv_filter_size, conv_filter_count);
+  dense1_weights = VectorXf::Random(conv_filter_count * ((input_size - conv_filter_size + 1) / 2) * ((input_size - conv_filter_size + 1) / 2));
+  dense2_weights = VectorXf::Random(dense1_units);
+  bias1 = VectorXf::Random(conv_filter_count);
+  bias2 = VectorXf::Random(dense1_units);
+  fluid_fc1_weights = MatrixXf::Random(fluid_feature_size, 64);
+  fluid_fc1_bias = VectorXf::Random(64);
+ }
+
+ VectorXf forward(const MatrixXf& input, const VectorXf& fluid_feature) {
+  MatrixXf conv_output = input * conv1_weights;
+  VectorXf flattened = conv_output.transpose().reshaped(conv_output.rows() * conv_output.cols(), 1);
+  VectorXf dense1_output = (flattened + bias1).cwiseMax(0); // ReLU activation
+  VectorXf dense2_output = (dense1_output.dot(dense1_weights) + bias2).cwiseMax(0); // ReLU activation
+  VectorXf fluid_layer = (fluid_feature.dot(fluid_fc1_weights)).cwiseMax(0) + fluid_fc1_bias; // ReLU activation
+  VectorXf combined_output = dense2_output.transpose() + fluid_layer;
+  return combined_output;
+ }
+
+ void train(const MatrixXf& input, const VectorXf& fluid_feature, const VectorXf& target, float learning_rate) {
+  VectorXf output = forward(input, fluid_feature);
+  VectorXf error = output - target;
+  float loss = error.squaredNorm() / input.rows();
+
+  // Gradient descent
+  VectorXf dense2_grad = error.transpose() * dense2_weights;
+  MatrixXf dense1_grad = dense2_grad.replicate(1, dense1_weights.size());
+  VectorXf dense1_output = input * conv1_weights;
+  VectorXf dense1_mask = (dense1_output.array() > 0).cast<float>();
+  dense1_grad = dense1_grad.cwiseProduct(dense1_mask);
+  dense1_weights -= learning_rate * dense1_grad;
+  VectorXf bias2_grad = error.transpose();
+  bias2 -= learning_rate * bias2_grad;
+  MatrixXf dense1_weight_grad = error * dense2_weights.transpose();
+  MatrixXf flattened_grad = dense1_weight_grad.reshaped(conv1_weights.rows(), conv1_weights.cols());
+  MatrixXf conv_grad = input.transpose() * flattened_grad;
+  conv1_weights -= learning_rate * conv_grad;
+
+  // Update weights according to the dynamic connection updater
+  DynamicConnectionUpdater connection_updater;
+  MatrixXf updated_weights = connection_updater.update(conv1_weights, fluid_feature);
+  conv1_weights = updated_weights;
+ }
+
+ float calculateMSE(const VectorXf& predictions, const VectorXf& targets) {
+  VectorXf error = predictions - targets;
+  return error.squaredNorm() / predictions.size();
+ }
+};
+
+// Function to load and preprocess fluid data
+std::tuple<std::vector<MatrixXf>, std::vector<VectorXf>, std::vector<VectorXf>> loadDataAndPreprocess(const FoamCase& case) {
+ // Implement data loading and preprocessing from OpenFOAM case
+ // Example: Load pressure (p) and velocity (U) fields from the case
+ scalarField p = case.fieldValues("p");
+ vectorField U = case.fieldValues("U");
+
+ // Convert OpenFOAM fields to Eigen matrices
+ std::vector<MatrixXf> input_data;
+ for (const auto& UField : U) {
+  // Assuming UField is a vector field (3 components) and pField is a scalar field
+  MatrixXf inputDataMatrix(3 + 1, UField.size()); // 3 components of velocity + 1 for pressure
+  inputDataMatrix << UField.component(0),
+           UField.component(1),
+           UField.component(2),
+           p;
+  input_data.push_back(inputDataMatrix);
+ }
+
+ // Assuming fluid features are extracted from p and U fields (e.g., vorticity)
+ std::vector<VectorXf> fluid_features;
+ for (const auto& pField : p) {
+  // Calculate vorticity from pressure field (p) and velocity field (U)
+  MatrixXf fluidFeatureMatrix = Eigen::curl(pField);
+  VectorXf fluidFeatureVector(fluidFeatureMatrix.size());
+  fluidFeatureVector << fluidFeatureMatrix;
+  fluid_features.push_back(fluidFeatureVector);
+ }
+
+ // Generate dummy targets for demonstration purposes
+ // Replace with appropriate target values based on your application
+ std::vector<VectorXf> targets(input_data.size(), VectorXf::Random(fluid_features[0].size()));
+
+ return std::make_tuple(input_data, fluid_features, targets);
+}
+
+// Function to evaluate the model
+float evaluateModel(const FluidLatticeNN& model, const std::vector<MatrixXf>& input_data, const std::vector<VectorXf>& fluid_features, const std::vector<VectorXf>& targets) {
+ float total_loss = 0.0;
+ for (size_t i = 0; i < input_data.size(); ++i) {
+  VectorXf predictions = model.forward(input_data[i], fluid_features[i]);
+  float mse = model.calculateMSE(predictions, targets[i]);
+  total_loss += mse;
+ }
+ return total_loss / input_data.size();
+}
+
+int main() {
+ // Create FLNN model
+ int input_size = 64;
+ int conv_filter_size = 3;
+ int conv_filter_count = 16;
+ int dense1_units = 128;
+ int fluid_feature_size = 32;
+ FluidLatticeNN fluid_nn(input_size, conv_filter_size, conv_filter_count, dense1_units, fluid_feature_size);
+
+ // Load and preprocess fluid data
+ FoamCase case("./my_fluid_case");
+ auto [input_data, fluid_features, targets] = loadDataAndPreprocess(case);
+
+ // Training parameters
+ int num_epochs = 10;
+ float learning_rate = 0.001;
+
+ // Training loop
+ for (int epoch = 0; epoch < num_epochs; ++epoch) {
+  for (size_t i = 0; i < input_data.size(); ++i) {
+   fluid_nn.train(input_data[i], fluid_features[i], targets[i], learning_rate);
+  }
+ }
+
+ // Evaluate the model
+ float average_loss = evaluateModel(fluid_nn, input_data, fluid_features, targets);
+ std::cout << "Average MSE Loss: " << average_loss << std::endl;
+
+ // Additional usage example: Make predictions using the trained model
+ MatrixXf new_input = ...; // Replace with your new input data
+ VectorXf fluid_feature = ...; // Replace with corresponding fluid feature
+ VectorXf prediction = fluid_nn.forward(new_input, fluid_feature);
+ std::cout << "Prediction: " << prediction << std::endl;
+
+ return 0;
+}
